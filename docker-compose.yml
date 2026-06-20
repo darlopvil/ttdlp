@@ -1,0 +1,16 @@
+services:
+  ttdlp_app:
+    build: .
+    container_name: ttdlp_app
+    restart: unless-stopped
+    volumes:
+      - ttdlp-cache:/cache
+    networks:
+      - nginx-proxy-manager_default
+
+volumes:
+  ttdlp-cache:
+
+networks:
+  nginx-proxy-manager_default:
+    external: true
