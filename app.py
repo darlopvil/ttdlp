@@ -3,8 +3,8 @@ from flask import Flask, request, send_file, abort
 
 app = Flask(__name__)
 CACHE_DIR = "/cache"
-TTL = 1800        # 30 min: las URLs de vídeo de TikTok caducan
-USER_TTL = 600    # 10 min: listados de perfil (yt-dlp es lento, cacheamos)
+TTL = 1800          # 30 min: las URLs de vídeo de TikTok caducan
+USER_TTL = 600      # 10 min: listados de perfil (yt-dlp es lento, cacheamos)
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 _locks = {}
