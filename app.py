@@ -28,6 +28,12 @@ def _cleanup():
                 os.remove(f)
         except OSError:
             pass
+    for f in glob.glob(os.path.join(CACHE_DIR, "audio_*.m4a")):
+        try:
+            if now - os.path.getmtime(f) > TTL:
+                os.remove(f)
+        except OSError:
+            pass
 
 def _download(vid, user, watermark):
     kind = "wm" if watermark else "nw"
@@ -54,6 +60,30 @@ def _download(vid, user, watermark):
             return None
         if r.returncode != 0 or not (os.path.exists(path) and os.path.getsize(path) > 0):
             app.logger.warning("yt-dlp fallo vid=%s rc=%s err=%s", vid, r.returncode, r.stderr[-400:])
+            return None
+    return path
+
+def _audio(vid, user):
+    path = os.path.join(CACHE_DIR, f"audio_{vid}.m4a")
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+    with _lock(path):
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return path
+        url = f"https://www.tiktok.com/@{user or '_'}/video/{vid}"
+        out = os.path.join(CACHE_DIR, f"audio_{vid}.%(ext)s")
+        cmd = [
+            "yt-dlp", "--no-warnings", "--no-playlist",
+            "-x", "--audio-format", "m4a",
+            "-o", out,
+            url,
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=100)
+        except subprocess.TimeoutExpired:
+            return None
+        if r.returncode != 0 or not (os.path.exists(path) and os.path.getsize(path) > 0):
+            app.logger.warning("yt-dlp audio fallo vid=%s rc=%s err=%s", vid, r.returncode, r.stderr[-400:])
             return None
     return path
 
@@ -116,6 +146,21 @@ def video():
 def download():
     wm = request.args.get("watermark") is not None
     return _serve(watermark=wm, attachment=True)
+
+@app.route("/audio")
+def audio():
+    vid = request.args.get("id", "")
+    user = request.args.get("user", "")
+    if not _VID.match(vid):
+        abort(400)
+    _cleanup()
+    path = _audio(vid, user)
+    if not path:
+        abort(502)
+    return send_file(
+        path, mimetype="audio/mp4", conditional=True,
+        download_name=f"tiktok-{vid}.m4a",
+    )
 
 @app.route("/user")
 def user():
