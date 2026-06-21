@@ -64,28 +64,26 @@ def _download(vid, user, watermark):
     return path
 
 def _audio(vid, user):
-    path = os.path.join(CACHE_DIR, f"audio_{vid}.m4a")
-    if os.path.exists(path) and os.path.getsize(path) > 0:
-        return path
-    with _lock(path):
-        if os.path.exists(path) and os.path.getsize(path) > 0:
-            return path
-        url = f"https://www.tiktok.com/@{user or '_'}/video/{vid}"
-        out = os.path.join(CACHE_DIR, f"audio_{vid}.%(ext)s")
-        cmd = [
-            "yt-dlp", "--no-warnings", "--no-playlist",
-            "-x", "--audio-format", "m4a",
-            "-o", out,
-            url,
-        ]
+    out = os.path.join(CACHE_DIR, f"audio_{vid}.m4a")
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+    with _lock(out):
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+        # Reutiliza el mp4 H.264 de /video (cacheado o nuevo) → su audio es AAC limpio.
+        # Esquiva el bytevc1/HEVC que hace fallar a ffprobe con -x.
+        mp4 = _download(vid, user, watermark=False)
+        if not mp4:
+            return None
+        cmd = ["ffmpeg", "-y", "-i", mp4, "-vn", "-c:a", "copy", "-movflags", "+faststart", out]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=100)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:
             return None
-        if r.returncode != 0 or not (os.path.exists(path) and os.path.getsize(path) > 0):
-            app.logger.warning("yt-dlp audio fallo vid=%s rc=%s err=%s", vid, r.returncode, r.stderr[-400:])
+        if r.returncode != 0 or not (os.path.exists(out) and os.path.getsize(out) > 0):
+            app.logger.warning("ffmpeg audio fallo vid=%s rc=%s err=%s", vid, r.returncode, r.stderr[-400:])
             return None
-    return path
+    return out
 
 def _user_list(username, start, count):
     end = start + count - 1
