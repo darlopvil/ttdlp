@@ -1,5 +1,6 @@
-import os, re, time, glob, threading, subprocess
+import os, re, time, json, glob, threading, subprocess
 from flask import Flask, request, send_file, abort
+import yt_dlp
 
 app = Flask(__name__)
 CACHE_DIR = "/cache"
@@ -13,6 +14,32 @@ _master = threading.Lock()
 def _lock(key):
     with _master:
         return _locks.setdefault(key, threading.Lock())
+
+# yt-dlp como librería, no como comando: cargarlo y arrancar Python en cada vídeo
+# costaba ~1 s (medido: comando 1,5-1,7 s por extracción; en proceso, con la
+# instancia ya caliente, 0,65 s). YoutubeDL no es thread-safe, así que cada hilo
+# de gunicorn reutiliza las suyas. Opciones = las de los antiguos comandos,
+# traducidas con yt_dlp.parse_options.
+_BASE = {"quiet": True, "no_warnings": True, "noprogress": True, "socket_timeout": 30}
+_tls = threading.local()
+
+def _ydl(kind):
+    cache = getattr(_tls, "ydl", None)
+    if cache is None:
+        cache = _tls.ydl = {}
+    if kind not in cache:
+        if kind == "user":
+            opts = {**_BASE, "extract_flat": "in_playlist"}
+        else:
+            opts = {
+                **_BASE, "noplaylist": True,
+                # Forzar H.264 (los navegadores no reproducen el bytevc1/H.265 de TikTok) y remux a mp4.
+                "format": "download/b" if kind == "wm" else "b",
+                "format_sort": ["vcodec:h264", "res", "br"],
+                "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
+            }
+        cache[kind] = yt_dlp.YoutubeDL(opts)
+    return cache[kind]
 
 def _cleanup():
     now = time.time()
@@ -44,22 +71,15 @@ def _download(vid, user, watermark):
         if os.path.exists(path) and os.path.getsize(path) > 0:
             return path
         url = f"https://www.tiktok.com/@{user or '_'}/video/{vid}"
-        # Forzar H.264 (los navegadores no reproducen el bytevc1/H.265 de TikTok) y remux a mp4.
-        fmt = "download/b" if watermark else "b"
-        cmd = [
-            "yt-dlp", "--no-warnings", "--no-playlist",
-            "-S", "vcodec:h264,res,br",
-            "-f", fmt,
-            "--remux-video", "mp4",
-            "-o", path,
-            url,
-        ]
+        ydl = _ydl(kind)
+        ydl.params["outtmpl"] = {"default": path}
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=100)
-        except subprocess.TimeoutExpired:
+            ydl.extract_info(url, download=True)
+        except Exception as e:
+            app.logger.warning("yt-dlp fallo vid=%s err=%s", vid, str(e)[-400:])
             return None
-        if r.returncode != 0 or not (os.path.exists(path) and os.path.getsize(path) > 0):
-            app.logger.warning("yt-dlp fallo vid=%s rc=%s err=%s", vid, r.returncode, r.stderr[-400:])
+        if not (os.path.exists(path) and os.path.getsize(path) > 0):
+            app.logger.warning("yt-dlp sin fichero vid=%s", vid)
             return None
     return path
 
@@ -95,24 +115,21 @@ def _user_list(username, start, count):
         except OSError:
             pass
     url = f"https://www.tiktok.com/@{username}"
-    cmd = [
-        "yt-dlp", "--flat-playlist", "--no-warnings", "-J",
-        "--playlist-start", str(start), "--playlist-end", str(end),
-        url,
-    ]
+    ydl = _ydl("user")
+    ydl.params["playliststart"] = start
+    ydl.params["playlistend"] = end
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-    except subprocess.TimeoutExpired:
-        return None
-    if r.returncode != 0 or not r.stdout:
-        app.logger.warning("yt-dlp user fallo user=%s rc=%s err=%s", username, r.returncode, r.stderr[-400:])
+        # Mismo JSON que daba el antiguo -J
+        out = json.dumps(ydl.sanitize_info(ydl.extract_info(url, download=False)))
+    except Exception as e:
+        app.logger.warning("yt-dlp user fallo user=%s err=%s", username, str(e)[-400:])
         return None
     try:
         with open(key, "w") as f:
-            f.write(r.stdout)
+            f.write(out)
     except OSError:
         pass
-    return r.stdout
+    return out
 
 _VID = re.compile(r"^\d{6,25}$")
 _UNAME = re.compile(r"^[\w.]{1,24}$")
